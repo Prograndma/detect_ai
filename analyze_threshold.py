@@ -52,6 +52,8 @@ def get_prob_per_token_of_sequence(seq, tokenizer, model, device="cuda"):
 
 
 def collator():
+    # todo: I'll want to keep track of the classes, not just generated or not, to see if my model works better on some
+    #  models or others.
     def return_func(batch):
         words = [item["data"] for item in batch]
         gener = [item["generated"] for item in batch]
