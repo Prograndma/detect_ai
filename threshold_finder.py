@@ -18,6 +18,38 @@ class ThresholdFinder:
         self.from_the_left = None
         self.from_the_right = None
 
+    def load(self):
+        self.probs = []
+        with open(f"{self.save_probs}", "r") as f:
+            for line in f:
+                current_line = line.split(",")
+                for prob in current_line:
+                    prob = prob.strip()
+                    if len(prob) == 0:
+                        continue
+                    self.probs.append(float(prob))
+
+        self.labels = []
+        with open(f"{self.save_labels}", "r") as f:
+            for line in f:
+                current_line = line.split(",")
+                for label in current_line:
+                    label = label.strip()
+                    if len(label) == 0:
+                        continue
+                    self.labels.append(int(label))
+
+        self.classes = []
+        with open(f"{self.save_classes}", "r") as f:
+            for line in f:
+                current_line = line.split(",")
+                for current_class in current_line:
+                    current_class = current_class.strip()
+                    if len(current_class) == 0:
+                        continue
+                    self.classes.append(current_class)
+        self._reorganize()
+
     def add(self, label: int, prob: float, a_class: str):
         self.labels.append(label)
         self.probs.append(prob)
@@ -34,7 +66,9 @@ class ThresholdFinder:
         self.reordered_labels = [x for _, x, _ in zip_sorted]
         self.reordered_classes = [x for _, _, x in zip_sorted]
         middle = sum(self.sorted_probs) / len(self.sorted_probs)
-        print(f"Middle value{middle}. Apply function of score = (({middle}) x method(input)) ^ 2")
+        print(f"Middle value: {middle}.\n"
+              f"Apply function of\n"
+              f"score = (({middle}) x method(input)) ^ 2")
         self.sorted_probs = [(prob - middle) ** 2 for prob in self.sorted_probs]
         zip_sorted = sorted(zip(self.sorted_probs, self.reordered_labels, self.reordered_classes), key=lambda pair: pair[0])
         self.sorted_probs = [x for x, _, _ in zip_sorted]
@@ -74,7 +108,39 @@ class ThresholdFinder:
             for a_class in self.classes:
                 f.write(f"{a_class}, ")
 
+    def find_optimal_f1(self):
+        if (self.reordered_labels is None or self.sorted_probs is None or self.from_the_left is None or
+                self.from_the_right is None):
+            self._reorganize()
+        previous_f1 = 0.0
+        have_found_f1 = False
+        best_threshold = -1111111
+        best_precision = 0.0
+        best_recall = 0.0
+        for i in range(len(self.reordered_labels)):
+            total_positive = len(self.sorted_probs[i:])
+            true_positive = sum(self.reordered_labels[i:])
 
+            if true_positive == 0:  # Not good enough.
+                continue
+            false_negative = sum(self.reordered_labels[:i])
+
+            precision = true_positive / total_positive
+            recall = true_positive / (true_positive + false_negative)
+
+            if (precision + recall) == 0:
+                continue
+            f1 = (2 * precision * recall) / (precision + recall)
+            if f1 >= previous_f1:
+                previous_f1 = f1
+                best_threshold = self.sorted_probs[i]
+                best_recall = recall
+                best_precision = precision
+                have_found_f1 = True
+
+        if not have_found_f1:
+            raise Exception("Didn't find a good f1!")
+        return best_threshold, best_precision, best_recall, previous_f1
 
 
     def visualize(self):
@@ -119,3 +185,15 @@ class ThresholdFinder:
         plt.show()
         # plt.colorbar(plt.cm.ScalarMappable(cmap="RdYlGn"), label="Proportion of 1's (Green)")
         # plt.show()
+
+
+if __name__ == "__main__":
+    thresh = ThresholdFinder("probs.txt", "labels.txt", "classes.txt",
+                             "sorted_probs.txt", "reordered_labels.txt", "reordered_classes.txt")
+
+    thresh.load()
+    main_threshold, main_precision, main_recall, main_f1 = thresh.find_optimal_f1()
+    print(f"Best Threshold: {main_threshold}\n"
+          f"Best Precision: {main_precision}\n"
+          f"Best Recall   : {main_recall}\n"
+          f"Best F1       : {main_f1}")
