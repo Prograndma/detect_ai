@@ -4,6 +4,8 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset, load_from_disk
 import os
 from threshold_finder import ThresholdFinder
+import time
+import math
 
 generated = (
     "In a shocking finding, scientists discovered a herd of unicorns living in a remote, previously unexplored "
@@ -26,20 +28,74 @@ beam_search = ("Attention is not too hard of a thing to learn, but it is very ha
 seed = 42
 
 
-def get_all_sub_strs(inp_str, tokenizer, device):
+def get_all_sub_strs(inp_str, tokenizer):
+    max_len = 500
+    if len(inp_str) > max_len * 1.3:
+        inp_str = inp_str[int(max_len * 1.3)]
+    tokens = tokenizer(inp_str, return_tensors="pt")["input_ids"][0]
     sub_strs = []
-    inputs = tokenizer(inp_str, return_tensors="pt").to(device)
-    tokens = inputs["input_ids"]
-    go_to_this_point = min(1000, len(tokens[0]))
-    for i in range(go_to_this_point):
-        sub_strs.append((tokenizer.decode(tokens[0][:i]), tokenizer.decode(tokens[0][i])))
-    return sub_strs[1:]
+    go_to_this_point = min(max_len, len(tokens))
+    for i in range(1, go_to_this_point):
+        sub_tokens = tokens[:i]
+        next_token = tokens[i:i+1]
+        sub_strs.append((tokenizer.decode(sub_tokens), tokenizer.decode(next_token)))
+    return sub_strs
+
+
+def performant_prob_per_token_batch(seq_batch, tokenizer, model, device="cuda"):
+    # Tokenize sequences as a batch
+    seq_batch = [seq[:int(500 * 1.3)] if len(seq) > 500 * 1.3 else seq for seq in seq_batch]
+
+    inputs = tokenizer(seq_batch, return_tensors="pt", padding=True, truncation=True).to(device)
+
+    # Compute logits without gradient calculations
+    with torch.no_grad():
+        logits = model(**inputs).logits
+
+    # Compute probabilities
+    probs = torch.softmax(logits, dim=-1)
+
+    # Extract token IDs and calculate probabilities
+    input_ids = inputs["input_ids"]
+    batch_probs = []
+
+    for i in range(len(seq_batch)):
+        seq_token_ids = input_ids[i]
+        seq_probs = probs[i, torch.arange(seq_token_ids.shape[0]), seq_token_ids]
+        token_likelihoods = seq_probs.tolist()
+
+        if len(token_likelihoods) == 0:
+            batch_probs.append(0)
+        else:
+            avg_prob = (sum(token_likelihoods) * 1000000) / len(token_likelihoods)
+            batch_probs.append(avg_prob)
+
+    return batch_probs
+
+
+def performant_prob_per_token(seq, tokenizer, model, device="cuda"):
+    with torch.no_grad():
+        if len(seq) > 400 * 1.3:
+            seq = seq[:int(400 * 1.3)]
+        inputs = tokenizer(seq, return_tensors="pt").to(device)
+        logits = model(**inputs).logits
+        # input_ids = inputs.input_ids
+        # seq_len = input_ids.shape[1]
+        # causal_mask = torch.tril(torch.ones((seq_len, seq_len))).unsqueeze(0).unsqueeze(1)
+        # logits = model(input_ids, attention_mask=causal_mask).logits
+    probs = torch.softmax(logits, dim=-1)
+    token_ids = [inputs["input_ids"][0][i].item() for i in range(inputs["input_ids"].shape[1])]
+    token_likelihoods = probs[0, torch.arange(len(token_ids)), token_ids].tolist()
+    if len(token_ids) == 0:
+        return 0
+    overall_liklihood = math.ldexp(sum(token_likelihoods), 17)
+    return overall_liklihood / len(token_likelihoods)#, len(token_likelihoods), token_likelihoods
 
 
 def get_prob_per_token_of_sequence(seq, tokenizer, model, device="cuda"):
     prob_results = []
     with torch.no_grad():
-        for (sub_str, next_str) in get_all_sub_strs(seq, tokenizer, device):
+        for (sub_str, next_str) in get_all_sub_strs(seq, tokenizer):
             inputs = tokenizer(sub_str, return_tensors="pt").to(device)
             logits = model(**inputs).logits[:, -1, :]
             probs = torch.softmax(logits, dim=-1)
@@ -48,32 +104,67 @@ def get_prob_per_token_of_sequence(seq, tokenizer, model, device="cuda"):
             prob_results.append(prob_of_next_word * 100)
     if len(prob_results) == 0:
         return 0
-    return sum(prob_results) / len(prob_results)
+    return sum(prob_results) / len(prob_results)#, len(prob_results), prob_results
 
 
 def collator():
-    # todo: I'll want to keep track of the classes, not just generated or not, to see if my model works better on some
-    #  models or others.
     def return_func(batch):
         words = [item["data"] for item in batch]
         gener = [item["generated"] for item in batch]
-        return words, gener
+        sequence_class = [item["model"] for item in batch]
+        return words, gener, sequence_class
     return return_func
 
 
-def process_dataset(model, tokenizer, data_loader, device="cuda"):
-    thresh = ThresholdFinder("probs.txt", "labels.txt")
-    for sample, (inp_text, is_generated) in enumerate(data_loader):
-        if num_blocks := (sample % (len(data_loader) // 20)) == 0:
-            block = "█"
-            dash = "-"
-            print(f"\r|{block * num_blocks}{dash * (20 - num_blocks)}|", end="")
-        for inp in inp_text:
-            perb = get_prob_per_token_of_sequence(inp, tokenizer, model, device)
-            thresh.add(is_generated, perb)
-    thresh.save_probs()
-    thresh._reorganize()
-    print(" DONE!")
+def hours_minutes(elapsed):
+    hours = elapsed / 60 / 60
+    minutes = (hours % 1) * 60
+    return hours, minutes
+
+
+def print_loading_bar(start, fill, empty, position, steps: int, num_fill, length: int, batch_size, done=False):
+    bump_blocks = 0
+    if position % (length // steps) == 0:
+        bump_blocks = 1
+    # num_blocks = int(length // 20)
+    time_taken = time.time() - start
+    hours_taken, minutes_taken = hours_minutes(time_taken)
+    average_time_per_sample = (time_taken / (position | 1)) * batch_size
+    hours_remaining, minutes_remaining = hours_minutes(length * average_time_per_sample - time_taken)
+    if done:
+        print(f"\r|{fill * (steps - 1)}| did {length}/{length}! "
+              f"Took {str(int(hours_taken)).zfill(2)}:{str(int(minutes_taken)).zfill(2)}. "
+              f"Taking {average_time_per_sample:.2f} seconds/batch.\n"
+              f"All done!")
+        return 0
+    print(f"\r|{fill * num_fill}{empty * ((steps - 1) - num_fill)}| did {str(position).zfill(4)}/{length}! "
+          f"Took {str(int(hours_taken)).zfill(2)}:{str(int(minutes_taken)).zfill(2)}. "
+          f"Taking {average_time_per_sample:.2f} seconds/batch. "
+          f"Estimated remaining time {str(int(hours_remaining)).zfill(2)}:{str(int(minutes_remaining)).zfill(2)} ",
+          end="")
+    return bump_blocks
+
+
+def process_dataset(model, tokenizer, data_loader, amount_do, batch_size, device="cuda"):
+    thresh = ThresholdFinder("probs.txt", "labels.txt", "classes.txt",
+                             "sorted_probs.txt", "reordered_labels.txt", "reordered_classes.txt")
+    start = time.time()
+    num_blocks = -1
+    sample = 0
+    for sample, (inp_text, is_generated, sample_class) in enumerate(data_loader):
+        if sample == amount_do:
+            break
+        num_blocks += print_loading_bar(start, "█", "-", sample * batch_size, 100, num_blocks, amount_do * batch_size, batch_size)
+        perbs = performant_prob_per_token_batch(inp_text, tokenizer, model, device)
+        for i, perb in enumerate(perbs):
+            if batch_size == 1:
+                thresh.add(is_generated[i][0], perb, sample_class[i][0])
+            else:
+                thresh.add(is_generated[i], perb, sample_class[i])
+    thresh.save()
+    _ = print_loading_bar(start, "█", "-", sample * batch_size, 100, num_blocks, amount_do * batch_size, batch_size, done=True)
+    thresh.visualize()
+    return thresh
 
 
 def main():
@@ -82,40 +173,25 @@ def main():
     if device == 'cpu':
         print("Cuda issues")
         exit()
-
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
 
-    print(f"generated:\t{get_prob_per_token_of_sequence(generated, tokenizer, model, device)}")
-    print(f"human    :\t{get_prob_per_token_of_sequence(human, tokenizer, model, device)}")
-    print(f"greedy   :\t{get_prob_per_token_of_sequence(greedy, tokenizer, model, device)}")
-    print(f"beam     :\t{get_prob_per_token_of_sequence(beam_search, tokenizer, model, device)}")
     if os.path.isdir("dataset\\ahma"):
         sequences = load_from_disk("dataset\\ahma")
     else:
         sequences = load_dataset("ahmadreza13/human-vs-Ai-generated-dataset")['train']
         sequences.save_to_disk("dataset\\ahma")
         exit()
-
     if sequences == False:
         exit()
 
-    data_loader = DataLoader(sequences.shuffle(seed=seed), batch_size=1, collate_fn=collator())
+    batch_size = 64
 
-    results = process_dataset(model, tokenizer, data_loader, device)
-    results_file = "results.txt"
-    with open(f"{results_file}", "w") as f:
-        f.write(results)
+    data_loader = DataLoader(sequences.shuffle(seed=seed), batch_size=batch_size, collate_fn=collator())
 
+    results = process_dataset(model, tokenizer, data_loader, 1000, batch_size, device)
 
 
 if __name__ == "__main__":
     main()
-
-
-# MAJOR TODO:: So I'm pretty sure, not confident, but preeeeetty sure that the model will output logits for every token
-#  passed in, which could speed my code up by like, a thousand times. Literally a thousand times. Since I wouldn't have
-#  to pass in each sequence n times (n being the amount of tokens in the sequence.) Also, here's another major speed up.
-#  I'm preeeetty sure that if I can do this, I could do batches as well. So. Things to look into. Right now this is slow
-#  as balls. I'll never get through the dataset like this. After hours I still haven't gotten through like a 20th of it.
-#  Rip.
