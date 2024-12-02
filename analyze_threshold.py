@@ -65,7 +65,7 @@ def performant_prob_per_token_batch(seq_batch, tokenizer, model, device="cuda"):
         token_likelihoods = seq_probs.tolist()
 
         if len(token_likelihoods) == 0:
-            batch_probs.append(0)
+            batch_probs.append(0.0)
         else:
             avg_prob = (sum(token_likelihoods) * 1000000) / len(token_likelihoods)
             batch_probs.append(avg_prob)
@@ -89,12 +89,13 @@ def performant_prob_per_token(seq, tokenizer, model, device="cuda"):
     if len(token_ids) == 0:
         return 0
     overall_liklihood = math.ldexp(sum(token_likelihoods), 17)
-    return overall_liklihood / len(token_likelihoods)#, len(token_likelihoods), token_likelihoods
+    return overall_liklihood / len(token_likelihoods)
 
 
 def get_prob_per_token_of_sequence(seq, tokenizer, model, device="cuda"):
     prob_results = []
     with torch.no_grad():
+        seq = seq[0]
         for (sub_str, next_str) in get_all_sub_strs(seq, tokenizer):
             inputs = tokenizer(sub_str, return_tensors="pt").to(device)
             logits = model(**inputs).logits[:, -1, :]
@@ -104,7 +105,7 @@ def get_prob_per_token_of_sequence(seq, tokenizer, model, device="cuda"):
             prob_results.append(prob_of_next_word * 100)
     if len(prob_results) == 0:
         return 0
-    return sum(prob_results) / len(prob_results)#, len(prob_results), prob_results
+    return [sum(prob_results) / len(prob_results)]
 
 
 def collator():
@@ -130,7 +131,7 @@ def print_loading_bar(start, fill, empty, position, steps: int, num_fill, length
     time_taken = time.time() - start
     hours_taken, minutes_taken = hours_minutes(time_taken)
     average_time_per_sample = (time_taken / (position | 1)) * batch_size
-    hours_remaining, minutes_remaining = hours_minutes(length * average_time_per_sample - time_taken)
+    hours_remaining, minutes_remaining = hours_minutes(length * (average_time_per_sample / batch_size) - time_taken)
     if done:
         print(f"\r|{fill * (steps - 1)}| did {length}/{length}! "
               f"Took {str(int(hours_taken)).zfill(2)}:{str(int(minutes_taken)).zfill(2)}. "
@@ -138,7 +139,7 @@ def print_loading_bar(start, fill, empty, position, steps: int, num_fill, length
               f"All done!")
         return 0
     print(f"\r|{fill * num_fill}{empty * ((steps - 1) - num_fill)}| did {str(position).zfill(4)}/{length}! "
-          f"Took {str(int(hours_taken)).zfill(2)}:{str(int(minutes_taken)).zfill(2)}. "
+          f"Elapsed Time {str(int(hours_taken)).zfill(2)}:{str(int(minutes_taken)).zfill(2)}. "
           f"Taking {average_time_per_sample:.2f} seconds/batch. "
           f"Estimated remaining time {str(int(hours_remaining)).zfill(2)}:{str(int(minutes_remaining)).zfill(2)} ",
           end="")
@@ -151,10 +152,12 @@ def process_dataset(model, tokenizer, data_loader, amount_do, batch_size, device
     start = time.time()
     num_blocks = -1
     sample = 0
+    steps = 115
     for sample, (inp_text, is_generated, sample_class) in enumerate(data_loader):
         if sample == amount_do:
             break
-        num_blocks += print_loading_bar(start, "█", "-", sample * batch_size, 100, num_blocks, amount_do * batch_size, batch_size)
+        num_blocks += print_loading_bar(start, "█", "-", sample * batch_size, steps, num_blocks,
+                                        amount_do * batch_size, batch_size)
         perbs = performant_prob_per_token_batch(inp_text, tokenizer, model, device)
         for i, perb in enumerate(perbs):
             if batch_size == 1:
@@ -162,8 +165,16 @@ def process_dataset(model, tokenizer, data_loader, amount_do, batch_size, device
             else:
                 thresh.add(is_generated[i], perb, sample_class[i])
     thresh.save()
-    _ = print_loading_bar(start, "█", "-", sample * batch_size, 100, num_blocks, amount_do * batch_size, batch_size, done=True)
+    _ = print_loading_bar(start, "█", "-", sample * batch_size, steps, num_blocks, amount_do * batch_size,
+                          batch_size, done=True)
+
+    threshold, precision, recall, f1 = thresh.find_optimal_f1()
+    print(f"Best Threshold: {threshold}\n"
+          f"Best Precision: {precision}\n"
+          f"Best Recall   : {recall}\n"
+          f"Best F1       : {f1}")
     thresh.visualize()
+
     return thresh
 
 
@@ -183,14 +194,14 @@ def main():
         sequences = load_dataset("ahmadreza13/human-vs-Ai-generated-dataset")['train']
         sequences.save_to_disk("dataset\\ahma")
         exit()
-    if sequences == False:
+    if not sequences:
         exit()
 
     batch_size = 64
 
     data_loader = DataLoader(sequences.shuffle(seed=seed), batch_size=batch_size, collate_fn=collator())
 
-    results = process_dataset(model, tokenizer, data_loader, 1000, batch_size, device)
+    results = process_dataset(model, tokenizer, data_loader, 5_000, batch_size, device)
 
 
 if __name__ == "__main__":
