@@ -147,8 +147,8 @@ def print_loading_bar(start, fill, empty, position, steps: int, num_fill, length
 
 
 def process_dataset(model, tokenizer, data_loader, amount_do, batch_size, device="cuda"):
-    thresh = ThresholdFinder("probs.txt", "labels.txt", "classes.txt",
-                             "sorted_probs.txt", "reordered_labels.txt", "reordered_classes.txt")
+    thresh = ThresholdFinder("gpt/probs.txt", "gpt/labels.txt", "gpt/classes.txt",
+                             "gpt/sorted_probs.txt", "gpt/reordered_labels.txt", "gpt/reordered_classes.txt")
     start = time.time()
     num_blocks = -1
     sample = 0
