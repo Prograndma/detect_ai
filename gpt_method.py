@@ -133,7 +133,7 @@ def print_loading_bar(start, fill, empty, position, steps: int, num_fill, length
     average_time_per_sample = (time_taken / (position | 1)) * batch_size
     hours_remaining, minutes_remaining = hours_minutes(length * (average_time_per_sample / batch_size) - time_taken)
     if done:
-        print(f"\r|{fill * (steps - 1)}| did {length}/{length}! "
+        print(f"\r|{fill * (steps - 1)}| did {str(position * batch_size).zfill(4)}/{length * batch_size}! "
               f"Took {str(int(hours_taken)).zfill(2)}:{str(int(minutes_taken)).zfill(2)}. "
               f"Taking {average_time_per_sample:.2f} seconds/batch.\n"
               f"All done!")
@@ -156,24 +156,29 @@ def process_dataset(model, tokenizer, data_loader, amount_do, batch_size, device
     for sample, (inp_text, is_generated, sample_class) in enumerate(data_loader):
         if sample == amount_do:
             break
-        num_blocks += print_loading_bar(start, "█", "-", sample * batch_size, steps, num_blocks,
-                                        amount_do * batch_size, batch_size)
+        num_blocks += print_loading_bar(start, "█", "-", sample, steps, num_blocks, amount_do, batch_size)
         perbs = performant_prob_per_token_batch(inp_text, tokenizer, model, device)
         for i, perb in enumerate(perbs):
             if batch_size == 1:
                 thresh.add(is_generated[i][0], perb, sample_class[i][0])
             else:
                 thresh.add(is_generated[i], perb, sample_class[i])
-    thresh.save()
+
     _ = print_loading_bar(start, "█", "-", sample * batch_size, steps, num_blocks, amount_do * batch_size,
                           batch_size, done=True)
-
+    print("Saving...", end="")
+    thresh.save()
+    print("Done!")
+    print("Finding optimal threshold...", end="")
     threshold, precision, recall, f1 = thresh.find_optimal_f1()
+    print("Done!")
     print(f"Best Threshold: {threshold}\n"
           f"Best Precision: {precision}\n"
           f"Best Recall   : {recall}\n"
           f"Best F1       : {f1}")
+    print("visualizing...", end="")
     thresh.visualize()
+    print("Done!")
 
     return thresh
 
