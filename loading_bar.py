@@ -15,7 +15,9 @@ class LoadingBar:
     def update(self, position):
         total = self.length * self.batch_size
         number_z_fill = len(str(total))
-        if position % (self.length // self.steps) == 0:
+        if self.length < self.steps:
+            self.num_fill = position // self.length
+        elif position % (self.length // self.steps) == 0:
             self.num_fill += 1
 
         time_taken = time() - self.start
@@ -27,7 +29,9 @@ class LoadingBar:
             average_time_per_batch = time_taken
         else:
             average_time_per_batch = (time_taken / position) * self.batch_size
-        hours_remaining, minutes_remaining = self._hours_minutes(self.length * (average_time_per_batch / self.batch_size) - time_taken)
+        seconds_remaining = self.length * (average_time_per_batch / self.batch_size) - time_taken
+        seconds_remaining = max(((self.length - position) * average_time_per_batch), seconds_remaining)
+        hours_remaining, minutes_remaining = self._hours_minutes(seconds_remaining)
         hours_remaining = str(int(hours_remaining)).zfill(2)
         minutes_remaining = str(int(minutes_remaining)).zfill(2)
 
