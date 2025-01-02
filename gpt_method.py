@@ -1,11 +1,12 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.utils.data import DataLoader
-from datasets import load_dataset, load_from_disk
+from datasets import load_dataset, load_from_disk, Dataset
 import os
 from threshold_finder import ThresholdFinder
 import time
 import math
+from loading_bar import LoadingBar
 
 generated = (
     "In a shocking finding, scientists discovered a herd of unicorns living in a remote, previously unexplored "
@@ -67,7 +68,7 @@ def performant_prob_per_token_batch(seq_batch, tokenizer, model, device="cuda"):
         if len(token_likelihoods) == 0:
             batch_probs.append(0.0)
         else:
-            avg_prob = (sum(token_likelihoods) * 1000000) / len(token_likelihoods)
+            avg_prob = (sum(token_likelihoods)) / len(token_likelihoods)
             batch_probs.append(avg_prob)
 
     return batch_probs
@@ -113,71 +114,51 @@ def collator():
         words = [item["data"] for item in batch]
         gener = [item["generated"] for item in batch]
         sequence_class = [item["model"] for item in batch]
-        return words, gener, sequence_class
+        real_words = []
+        real_gener = []
+        real_sequence_class = []
+        for i, wordy in enumerate(words):
+            if len(wordy) < 100:
+                continue
+            real_words.append(wordy)
+            real_gener.append(gener[i])
+            real_sequence_class.append(sequence_class[i])
+        return real_words, real_gener, real_sequence_class
     return return_func
 
 
-def hours_minutes(elapsed):
-    hours = elapsed / 60 / 60
-    minutes = (hours % 1) * 60
-    return hours, minutes
-
-
-def print_loading_bar(start, fill, empty, position, steps: int, num_fill, length: int, batch_size, done=False):
-    bump_blocks = 0
-    if position % (length // steps) == 0:
-        bump_blocks = 1
-    # num_blocks = int(length // 20)
-    time_taken = time.time() - start
-    hours_taken, minutes_taken = hours_minutes(time_taken)
-    average_time_per_sample = (time_taken / (position | 1)) * batch_size
-    hours_remaining, minutes_remaining = hours_minutes(length * (average_time_per_sample / batch_size) - time_taken)
-    if done:
-        print(f"\r|{fill * (steps - 1)}| did {str(position * batch_size).zfill(4)}/{length * batch_size}! "
-              f"Took {str(int(hours_taken)).zfill(2)}:{str(int(minutes_taken)).zfill(2)}. "
-              f"Taking {average_time_per_sample:.2f} seconds/batch.\n"
-              f"All done!")
-        return 0
-    print(f"\r|{fill * num_fill}{empty * ((steps - 1) - num_fill)}| did {str(position).zfill(4)}/{length}! "
-          f"Elapsed Time {str(int(hours_taken)).zfill(2)}:{str(int(minutes_taken)).zfill(2)}. "
-          f"Taking {average_time_per_sample:.2f} seconds/batch. "
-          f"Estimated remaining time {str(int(hours_remaining)).zfill(2)}:{str(int(minutes_remaining)).zfill(2)} ",
-          end="")
-    return bump_blocks
-
-
-def process_dataset(model, tokenizer, data_loader, amount_do, batch_size, device="cuda"):
-    thresh = ThresholdFinder("gpt/probs.txt", "gpt/labels.txt", "gpt/classes.txt",
-                             "gpt/sorted_probs.txt", "gpt/reordered_labels.txt", "gpt/reordered_classes.txt")
+def process_dataset(thresh, model, tokenizer, data_loader, amount_do, batch_size, device="cuda"):
     start = time.time()
-    num_blocks = -1
-    sample = 0
-    steps = 115
+    steps = 100
+    amount_do = min(amount_do, len(data_loader))
+    bar = LoadingBar(start, steps, amount_do, batch_size)
     for sample, (inp_text, is_generated, sample_class) in enumerate(data_loader):
-        if sample == amount_do:
+        if sample >= amount_do:
             break
-        num_blocks += print_loading_bar(start, "█", "-", sample, steps, num_blocks, amount_do, batch_size)
+        print(bar.update(sample), end="")
         perbs = performant_prob_per_token_batch(inp_text, tokenizer, model, device)
         for i, perb in enumerate(perbs):
             if batch_size == 1:
-                thresh.add(is_generated[i][0], perb, sample_class[i][0])
+                thresh.add(is_generated[i][0], perb, sample_class[i][0], inp_text[0])
             else:
-                thresh.add(is_generated[i], perb, sample_class[i])
+                thresh.add(is_generated[i], perb, sample_class[i], inp_text[i])
 
-    _ = print_loading_bar(start, "█", "-", sample * batch_size, steps, num_blocks, amount_do * batch_size,
-                          batch_size, done=True)
+    print(bar.finish())
     print("Saving...", end="")
     thresh.save()
     print("Done!")
     print("Finding optimal threshold...", end="")
-    threshold, precision, recall, f1 = thresh.find_optimal_f1()
-    print("Done!")
+    (threshold, precision, recall, f1, num_humans_labeled_human, num_labeled_human,
+     num_humans_labeled_ai, num_labeled_ai) = thresh.find_optimal_f1()
     print(f"Best Threshold: {threshold}\n"
           f"Best Precision: {precision}\n"
           f"Best Recall   : {recall}\n"
-          f"Best F1       : {f1}")
-    print("visualizing...", end="")
-    thresh.visualize()
+          f"Best F1       : {f1}\n"
+          f"Num humans labeled human : {num_humans_labeled_human}\n"
+          f"Num AI labeled human     : {num_labeled_human - num_humans_labeled_human}\n"
+          f"Num AI labeled AI        : {num_labeled_ai - num_humans_labeled_ai}\n"
+          f"Num humans_labeled AI    : {num_humans_labeled_ai}")
+    # thresh.visualize()
     print("Done!")
 
     return thresh
@@ -204,9 +185,75 @@ def main():
 
     batch_size = 64
 
-    data_loader = DataLoader(sequences.shuffle(seed=seed), batch_size=batch_size, collate_fn=collator())
+    base_dir = "gpt/"
+    end = ".txt"
+    modified = f"{base_dir}reordered_"
+    pb = f"{base_dir}probs{end}"
+    sorted_pb = f"{base_dir}sorted_probs{end}"
 
-    results = process_dataset(model, tokenizer, data_loader, 5_000, batch_size, device)
+    labels = f"{base_dir}labels{end}"
+    re_labels = f"{modified}labels{end}"
+
+    classes = f"{base_dir}classes{end}"
+    re_classes = f"{modified}classes{end}"
+
+    save_sequences = f"{base_dir}sequences{end}"
+    re_sequences = f"{modified}sequences{end}"
+    thresh = ThresholdFinder(pb, labels, classes, save_sequences, sorted_pb, re_labels, re_classes, re_sequences)
+    # thresh.load()
+    amount_do = 1_000
+
+    sequences_gpt: Dataset = sequences.filter(lambda seq: seq["model"] == "GPT4")
+    data_loader = DataLoader(sequences_gpt.shuffle(seed=seed), batch_size=batch_size, collate_fn=collator())
+    results = process_dataset(thresh, model, tokenizer, data_loader, amount_do, batch_size, device)
+    print("################################")
+    print(f"{len(thresh.probs)=}")
+    # if len(thresh.probs) != 64000:
+    #     exit()
+    # exit()
+    sequences_claude: Dataset = sequences.filter(lambda seq: seq["model"] == "claude")
+    data_loader = DataLoader(sequences_claude.shuffle(seed=seed), batch_size=batch_size, collate_fn=collator())
+    results = process_dataset(thresh, model, tokenizer, data_loader, amount_do, batch_size, device)
+
+    sequences_opus: Dataset = sequences.filter(lambda seq: seq["model"] == "Claude3-Opus")
+    data_loader = DataLoader(sequences_opus.shuffle(seed=seed), batch_size=batch_size, collate_fn=collator())
+    print(len(sequences_opus))
+    results = process_dataset(thresh, model, tokenizer, data_loader, amount_do, batch_size, device)
+
+    sequences_gemini: Dataset = sequences.filter(lambda seq: seq["model"] == "gemini-1.5-pro")
+    data_loader = DataLoader(sequences_gemini.shuffle(seed=seed), batch_size=batch_size, collate_fn=collator())
+    results = process_dataset(thresh, model, tokenizer, data_loader, amount_do, batch_size, device)
+
+    amount_do = int(len(thresh.probs) / batch_size)
+    sequences_wiki: Dataset = sequences.filter(lambda seq: seq["model"] == "wikipedia")
+    data_loader = DataLoader(sequences_wiki.shuffle(seed=seed), batch_size=batch_size, collate_fn=collator())
+    results = process_dataset(thresh, model, tokenizer, data_loader, amount_do, batch_size, device)
+    info_counts = thresh.amount_classes()
+    for key in info_counts.keys():
+        print(f"{key}: {info_counts[key]}")
+    thresh.reorganize_modify()
+    # thresh.visualize()
+    # thresh.visualize_for_each_class()
+    (main_threshold, main_precision, main_recall, main_f1, num_humans_labeled_human, num_labeled_human,
+     num_humans_labeled_ai, num_labeled_ai) = thresh.find_optimal_f1()
+    print(f"Best Threshold: {main_threshold}\n"
+          f"Best Precision: {main_precision}\n"
+          f"Best Recall   : {main_recall}\n"
+          f"Best F1       : {main_f1}\n"
+          f"Num humans labeled human : {num_humans_labeled_human}\n"
+          f"Num AI labeled human     : {num_labeled_human - num_humans_labeled_human}\n"
+          f"Num AI labeled AI        : {num_labeled_ai - num_humans_labeled_ai}\n"
+          f"Num humans_labeled AI    : {num_humans_labeled_ai}")
+    falsely_innocent = thresh.get_false_negative_sample(10, main_threshold)
+    falsely_accused = thresh.get_false_positive_sample(10, main_threshold)
+
+    print("\nFalsely declared innocent!")
+    for thing in falsely_innocent:
+        print(thing)
+
+    print("\nFalsely accused of being ai, but it's not!")
+    for thing in falsely_accused:
+        print(thing)
 
 
 if __name__ == "__main__":
