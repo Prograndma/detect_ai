@@ -23,7 +23,7 @@ This tool uses the GPT2 model and tokenizer to analyze the liklihood of text as 
 ### 1. Open the Google Colab Notebook
 Click the link below to access the interactive notebook:
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)]([[https://colab.research.google.com/your-notebook-link-here](https://colab.research.google.com/github/Prograndma/detect_ai/blob/main/Detecting_AI.ipynb)](https://colab.research.google.com/github/Prograndma/detect_ai/blob/main/Detecting_AI.ipynb))
+[[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)]([[https://colab.research.google.com/your-notebook-link-here](https://colab.research.google.com/github/Prograndma/detect_ai/blob/main/Detecting_AI.ipynb)](https://colab.research.google.com/github/Prograndma/detect_ai/blob/main/Detecting_AI.ipynb))](https://colab.research.google.com/github/Prograndma/detect_ai/blob/main/Detecting_AI.ipynb)
 
 ### 2. Run the Notebook
 1. Click on the "Run All" button or execute each cell step-by-step.
